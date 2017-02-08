@@ -1,15 +1,18 @@
 package com.github.arnaudroger.noop;
 
-import java.lang.reflect.InvocationHandler;
+import net.bytebuddy.ByteBuddy;
+import net.bytebuddy.dynamic.DynamicType;
+import net.bytebuddy.implementation.FixedValue;
+
+import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.lang.reflect.Proxy;
+import java.lang.reflect.TypeVariable;
 import java.util.HashMap;
 import java.util.Map;
 
 public class NoopFactory {
-
-    private static final InvocationHandler NULL_INVOCATION_HANDLER = new ConstantInvocationHandler(null);
 
     private static final Map<Class<?>, Object> DEFAULT_VALUES = new HashMap<>();
 
@@ -24,19 +27,11 @@ public class NoopFactory {
         DEFAULT_VALUES.put(double.class, (double)0);
     }
 
-    private static final ClassValue<InvocationHandler> PRIMTIVES_INVOCATION_HANDLERS = new ClassValue<InvocationHandler>() {
+
+    private static final ClassValue<Class<?>> BYTEBUDDIES = new ClassValue<Class<?>>() {
         @Override
-        protected InvocationHandler computeValue(Class<?> type) {
-            if (!type.isPrimitive()) {
-                throw new IllegalArgumentException("Only support primitives");
-            }
-
-            Object value = DEFAULT_VALUES.get(type);
-
-            if (value == null) {
-                throw new IllegalStateException("No default value defined for " + type);
-            }
-            return new ConstantInvocationHandler(value);
+        protected Class<?> computeValue(Class<?> type) {
+            return createByteBuddyClass(getFunctionalMethod(type));
         }
     };
 
@@ -47,7 +42,37 @@ public class NoopFactory {
             throw new IllegalArgumentException("Expect class to be a functional interface " + target);
         }
 
-        return (T) Proxy.newProxyInstance(target.getClassLoader(), new Class[]{target}, newInvotionHandler(m));
+
+        try {
+            return (T) BYTEBUDDIES.get(target).newInstance();
+        } catch (InstantiationException|IllegalAccessException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static Class<?> createByteBuddyClass(Method m) {
+        DynamicType.Builder<Object> subclass = new ByteBuddy().subclass(Object.class);
+
+        Class<?> target = m.getDeclaringClass();
+        for(TypeVariable<?> tv : target.getTypeParameters()) {
+             subclass = subclass.typeVariable(tv.getName(), Object.class);
+        }
+        DynamicType.Builder.MethodDefinition.ImplementationDefinition<Object> method = subclass.implement(target).define(m);
+
+        DynamicType.Builder.MethodDefinition.ReceiverTypeDefinition<Object> definition;
+        if (m.getReturnType().isPrimitive()) {
+            definition = method.intercept(FixedValue.value(DEFAULT_VALUES.get(m.getReturnType())));
+        } else {
+            definition = method.intercept(FixedValue.nullValue());
+        }
+
+        DynamicType.Unloaded<Object> make = definition.make();
+//        try {
+//            make.saveIn(new File("target/"));
+//        } catch (IOException e) {
+//            e.printStackTrace();
+//        }
+        return make.load(target.getClassLoader()).getLoaded();
     }
 
     static Method getFunctionalMethod(Class<?> target) {
@@ -76,27 +101,5 @@ public class NoopFactory {
             return !(int.class.equals(m.getReturnType()) && m.getParameterCount() == 0);
         }
         return true;
-    }
-
-    private static InvocationHandler newInvotionHandler(Method target) {
-        Class<?> returnType = target.getReturnType();
-        if (!returnType.isPrimitive()) {
-            return NULL_INVOCATION_HANDLER;
-        }
-
-        return PRIMTIVES_INVOCATION_HANDLERS.get(returnType);
-    }
-
-    private static class ConstantInvocationHandler implements InvocationHandler {
-        private final Object value;
-
-        private ConstantInvocationHandler(Object value) {
-            this.value = value;
-        }
-
-        @Override
-        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            return value;
-        }
     }
 }
